@@ -1,0 +1,128 @@
+[bits 32]
+section .note.GNU-stack noalloc noexec nowrite progbits
+
+%define ERROR_CODE nop
+%define ZERO push 0
+
+extern idt_table        ; idt_table 是 C 中注册的中断处理程序数组
+
+section .data
+global intr_entry_table, intr_exit
+
+intr_entry_table:
+    %macro VECTOR 2     ; 定义多行的宏
+        section .text
+        intr%1entry:
+            %2                  ; 会根据实际的参数展开为 nop 或 push 0
+            push ds
+            push es
+            push fs
+            push gs
+            pushad              ; 入栈顺序 EAX->ECX->EDX->EBX->ESP->EBP->ESI->EDI
+
+            mov al, 0x20        ; 中断结束命令 EOI
+            out 0xa0, al        ; 向从片发送 OCW2
+            out 0x20, al        ; 向主片发送 OCW2
+
+            push %1             ; 压入中断向量号
+            call [idt_table + %1 * 4]   ; 调用 idt_table 中的 C 函数中断处理函数
+            jmp intr_exit
+
+        section .data
+            dd intr%1entry      ; 在数组中存储各中断入口程序的地址
+    %endmacro
+
+section .text
+; 以下是恢复上下文环境
+intr_exit:
+    add esp, 4                  ; 跳过中断号
+    popad
+    pop gs
+    pop fs
+    pop es
+    pop ds
+    add esp, 4                  ; 跳过error_code
+    iretd
+
+VECTOR 0x00, ZERO
+VECTOR 0x01, ZERO
+VECTOR 0x02, ZERO
+VECTOR 0x03, ZERO 
+VECTOR 0x04, ZERO
+VECTOR 0x05, ZERO
+VECTOR 0x06, ZERO
+VECTOR 0x07, ZERO 
+VECTOR 0x08, ERROR_CODE
+VECTOR 0x09, ZERO
+VECTOR 0x0a, ERROR_CODE
+VECTOR 0x0b, ERROR_CODE 
+VECTOR 0x0c, ERROR_CODE
+VECTOR 0x0d, ERROR_CODE
+VECTOR 0x0e, ERROR_CODE
+VECTOR 0x0f, ZERO 
+VECTOR 0x10, ZERO
+VECTOR 0x11, ERROR_CODE
+VECTOR 0x12, ZERO
+VECTOR 0x13, ZERO 
+VECTOR 0x14, ZERO
+VECTOR 0x15, ZERO
+VECTOR 0x16, ZERO
+VECTOR 0x17, ZERO 
+VECTOR 0x18, ERROR_CODE
+VECTOR 0x19, ZERO
+VECTOR 0x1a, ERROR_CODE
+VECTOR 0x1b, ERROR_CODE 
+VECTOR 0x1c, ZERO
+VECTOR 0x1d, ERROR_CODE
+VECTOR 0x1e, ERROR_CODE
+VECTOR 0x1f, ZERO 
+VECTOR 0x20,ZERO	; 时钟中断对应的入口
+VECTOR 0x21,ZERO	; 键盘中断对应的入口
+VECTOR 0x22,ZERO	; 级联用的
+VECTOR 0x23,ZERO	; 串口 2 对应的入口
+VECTOR 0x24,ZERO	; 串口 1 对应的入口
+VECTOR 0x25,ZERO	; 并口 2 对应的入口
+VECTOR 0x26,ZERO	; 软盘对应的入口
+VECTOR 0x27,ZERO	; 并口 1 对应的入口
+VECTOR 0x28,ZERO	; 实时时钟对应的入口
+VECTOR 0x29,ZERO	; 重定向
+VECTOR 0x2a,ZERO	; 保留
+VECTOR 0x2b,ZERO	; 保留
+VECTOR 0x2c,ZERO	; ps/2 鼠标
+VECTOR 0x2d,ZERO	; fpu 浮点单元异常
+VECTOR 0x2e,ZERO	; 硬盘
+VECTOR 0x2f,ZERO	; 保留
+
+[bits 32]
+extern syscall_table
+section .text
+global syscall_handler
+
+; ---------------------------------------------------------------
+; 函数: 0x80 号中断
+; ---------------------------------------------------------------
+syscall_handler:
+; 第 1 步 保存上下文环境
+    push 0                  ; 压入0, 使栈中格式统一
+
+    push ds
+    push es
+    push fs
+    push gs
+    pushad                  ; PUSHAD指令压入32位寄存器, 其入栈顺序是:
+				            ; EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI 
+
+    push 0x80               ; 此位置压入 0x80 也是为了保持统一的栈格式
+
+; 第 2 步 为系统调用子功能传入参数
+    push edx
+    push ecx
+    push ebx
+
+; 第 3 步 调用 syscall_table 中的 C 函数中断处理函数
+    call [syscall_table + eax * 4]
+    add esp, 12             ; 跨过上面的三个参数
+
+; 第 4 步 将 call 调用后的返回值存入待当前内核栈中 eax 的位置
+    mov [esp + 8 * 4], eax 
+    jmp intr_exit           ; intr_exit 返回,恢复上下文

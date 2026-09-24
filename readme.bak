@@ -1,0 +1,92 @@
+# 内核线程与用户进程在创建时的内存布局是不同的
+内核线程	1 页PCB
+用户进程	1 页PCB + 23 页位图 + 1 页页目录 + n 页页表
+
+# 用户进程创建后的内存布局
+- 1 个 PCB 页, [P：0x00200000], 内核栈与 PCB 共用一页, 位于该页的顶端向下发展
+
+- 23 个存放用户虚拟地址位图的存储页, [P：0x00201000]
+  - (0xC0000000 - 0x08048000) / 4096 / 8 = 94199 字节 → DIV_ROUND_UP(94199, 4096) = 23 页
+
+- 1 个页目录表页, [P：0x00218000]
+  - create_page_dir 的 memcpy 复制了 PDE 768..1023。这些 PDE 在 loader.s 中就被填好了, 所有进程直接复用, 不为每个进程单独分配。
+
+- 页表是按需、逐步创建的
+  1. [用户栈]创建 — start_process 里, [P：0x00219000], 创建第 1 个页表, 指向用户物理池 [P：0x01100000]
+  2. [用户堆/其他用户内存]分配 —— sys_malloc 里, [P：0x00219000] 之后的内存页, 指向用户物理池 [P：0x01101000] 之后的内存空间
+
+- 以上内存页的物理地址, 都是在内核物理池中, 也就是从 [P：0x00200000] 开始的内存空间
+
+- 用户虚拟地址
+  - 从 [V：0x08048000] 开始向上扩展, 对应 [P：0x01100000] 之上的空间
+  - 包括代码段(.text), 数据段(.data/.bss), 堆区(.heap)
+    - 当使用 malloc 等函数分配内存时, 会自动在堆区分配内存, 堆区的地址是 0x01100000 ~ 0x01100000 + 24096 字节。
+  - [用户栈]从 [V：0xC0000000] 开始向下扩展
+
+  - 以上用户进程的数据, 全部位于用户物理池中, 也就是从 [P：0x01100000] 开始的内存空间
+
+- sys_open("/file1", O_CREAT) 触发的完整过程
+
+sys_open()                              ← fs.c:226  入口
+ ├─ path_depth_cnt()                    ← fs.c:186  算路径深度(=1)
+ │   └─ path_parse()                    ← fs.c:175  从 "/file1" 解析出 "file1"
+ ├─ search_file()                       ← fs.c:200  在根目录里找 file1
+ │   ├─ path_parse()                    (再次解析)
+ │   ├─ search_dir_entry()              ← dir.c:28  遍历根目录数据块找文件名
+ │   └─ dir_open()/dir_close()          ← dir.c:19  打开/关闭中间目录
+ ├─ file_create()                       ← file.c:88 真正"创建文件"
+ │   ├─ inode_bitmap_alloc()            ← file.c:47 在 inode_bitmap 里占一个位
+ │   ├─ sys_malloc() + inode_init()     ← inode.c:148  在内存里造一个新 inode
+ │   ├─ get_free_slot_in_global()       ← file.c:11 在 file_table 里占一个槽
+ │   ├─ create_dir_entry()              ← dir.c:101  在内存里造目录项
+ │   ├─ sync_dir_entry() ★              ← dir.c:110  把目录项写到父目录的数据块
+ │   │   ├─ block_bitmap_alloc()        ← file.c:56  (可能)分配新数据块
+ │   │   ├─ bitmap_sync(BLOCK_BITMAP)   ← file.c:67  block_bitmap 同步回盘
+ │   │   └─ ide_write()                 (写根目录数据块,加 file1 这一项)
+ │   ├─ inode_sync(parent_dir->inode) ★ ← inode.c:43 把根目录 inode 写回盘(i_size 变 0x48)
+ │   ├─ inode_sync(new_file_inode) ★    ← inode.c:43 把新建 file1 的 inode 写回盘
+ │   ├─ bitmap_sync(INODE_BITMAP) ★      ← file.c:67  inode_bitmap 同步回盘
+ │   └─ pcb_fd_install()                ← file.c:24  把全局 fd 装到当前 PCB
+ └─ 返回 fd
+带 ★ 的就是会真正动到硬盘的写操作。
+
+- 在使用用户进程进行系统调用时, 比如 open(), 会引起"#PF 0x0804800C" 异常, 主要发生在 inode_open() 中
+  - inode_buf 是用户进程分配的内存地址, 不能被内核态的 ide_read() 使用
+  - 如果将 cur->pgdir = cur_pagedir_bak 移动到最后面, 就不会引起"#PF 0x0804800C" 异常
+  - 但会在退出 int 0x80 中断的 iretd 指令执行后产生 "#PF 0xBFFFFFC4" 异常
+    - Trae 说：问题出在：cur->pgdir = NULL 在 ide_read → sema_down → thread_block 期间还没恢复, 
+    - 用户进程被换出时 pgdir == NULL。当它被唤醒重新调度时, process_activate 检查到 pgdir == NULL, 
+    - 就加载 CR3 = 0x100000（内核页目录） 而不是用户进程自己的页目录。之后虽然 pgdir 被恢复了, 
+    - 但 CR3 没有被重新加载, 导致 iret 时用内核页目录访问只存在于用户页目录的 0xBFFFFFC4, 所以 "#PF"
+
+- 2026/09/21 发生的带参数的用户程序execv时的问题
+🎯 问题复盘与修复清单
+Bug 1：GP 异常（#GP error_code=0x0）
+根因：start_process 和 sys_execv 初始化 intr_stack 时把 gs 设为 0（NULL selector）。
+用户态代码访问 %gs 段前缀时（GCC stack-protector 生成的 canary 读取）触发空选择子 #GP。 
+修复：gs = SELECTOR_U_DATA（合法的 4GB 数据段选择子）
+
+Bug 2：PF 异常（CR2=0x14）
+根因：修了 gs 后，gs=SELECTOR_U_DATA (base=0)，mov %gs:0x14 实际访问虚拟地址 0x14，
+但 NULL 保护区无映射。 修复：用户程序编译加 -fno-stack-protector，
+禁止 GCC 生成 stack-protector 代码（我们没有 TLS/TCB 支持）
+
+Bug 3：完整 intr_stack 初始化
+根因：原来 sys_execv 只改 ebx/ecx/eip/esp 四个字段，其余全部靠 fork 继承值。
+在嵌套 fork 链上，继承值可能带垃圾。 
+修复：仿照 start_process 完整初始化整个 intr_stack（所有通用寄存器清 0、段寄存器设 SELECTOR_U_DATA、eflags 显式开 IF=1、cs/ss 设用户选择子）
+
+Bug 4：argv 被覆盖（潜在）
+观察：sys_execv 的 load(path) 在 segment_load 里 mfree+get_a_page 覆盖 ELF 段地址时，
+如果 argv 数组/字符串恰好在旧进程的 .data 段里（位于 0x08048000 起始的用户空间），会被覆盖为 ELF 数据。 
+当前为什么没触发：因为你重新 make 后 prog_no_arg 和 prog_arg 的 ELF PT_LOAD 段只覆盖了 0x08048000 附近几页，
+shell .data 可能碰巧不在这些页里。但这是脆弱的——换个布局可能又挂。 
+后续真正的修复：sys_execv 应该在 load(path) 之前把 argv 深拷贝到内核缓冲区，load 完成后再拷贝到不会被覆盖的安全位置（比如新用户栈上）。
+
+调试技术亮点
+这次我们用到了几条很关键的调试技巧，值得记下来：
+
+GP error code = 0x0 立即定位到"空选择子"问题（bit0=0 表示非段选择子相关，或选择子 index=0）
+从 Bochs dump 反解汇编指令：把小端序 0xfdd48589 转换成内存字节顺序 89 85 d4 fd，逐字节解码出指令
+CR2=0x14 直接算出虚拟地址 = 段基址 + 0x14，反推出段寄存器 base=0
+对比两个构建路径（shell 直接启动 vs fork+execv 嵌套）来区分哪个 init 路径漏了初始化
