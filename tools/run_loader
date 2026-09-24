@@ -1,0 +1,72 @@
+#!/bin/sh
+set -e  # 错误即退出
+
+SELF=$(command -v "$0" || echo "$0")
+OSLAB_PATH=$(cd "$(dirname "$SELF")" && pwd)
+export OSLAB_PATH
+
+BOOT=$OSLAB_PATH/code/c00/boot
+LIB=$OSLAB_PATH/code/c00/lib
+KERNEL=$OSLAB_PATH/code/c00/kernel
+KERNEL_LIB=$OSLAB_PATH/code/c00/lib/kernel
+DEVICE=$OSLAB_PATH/code/c00/device
+BUILD=$OSLAB_PATH/code/c00/build
+IMG=$OSLAB_PATH/hd60M.img
+CFLAGS="-m32 -fno-pic -fno-pie -fno-builtin -fno-stack-protector -nostdinc -Wall -std=c99"
+INCLUDES="-I $KERNEL_LIB/ -I $KERNEL/ -I $LIB/ -I $DEVICE/"
+
+clean() {
+    echo "==> Cleaning build artifacts under code/c00"
+    find "$OSLAB_PATH/code/c00/build" -type f \( -name '*.o' -o -name '*.bin' \) -print -exec rm -f {} +
+    echo "==> Done"
+}
+
+if [ "$1" = "clean" ]; then
+    clean
+    exit 0
+fi
+
+write_sector() {
+    dd if="$1" of="$IMG" bs=512 count="$2" seek="$3" conv=notrunc status=none
+}
+
+echo "==> [01] Assembling mbr.s"
+nasm -o "$BUILD/mbr.bin" "$BOOT/mbr.s"
+
+echo "==> [02] Assembling Loader.s"
+nasm -o "$BUILD/loader.bin" "$BOOT/loader.s"
+
+echo "==> [03] Assembling kernel.s"
+nasm -f elf -o "$BUILD/kernel.o" "$KERNEL/kernel.s"
+
+echo "==> [04] Assembling print.s"
+nasm -f elf -o "$BUILD/print.o" "$KERNEL_LIB/print.s"
+
+echo "==> [05] Compiling main.c"
+gcc $CFLAGS $INCLUDES -c -o "$BUILD/main.o" "$KERNEL/main.c"
+
+echo "==> [06] Compiling interrupt.c"
+gcc $CFLAGS $INCLUDES -c -o "$BUILD/interrupt.o" "$KERNEL/interrupt.c"
+
+echo "==> [07] Compiling init.c"
+gcc $CFLAGS $INCLUDES -c -o "$BUILD/init.o" "$KERNEL/init.c"
+
+echo "==> [08] Compiling timer.c"
+gcc $CFLAGS $INCLUDES -c -o "$BUILD/timer.o" "$DEVICE/timer.c"
+
+echo "==> [99] Linking kernel.bin"
+ld -m elf_i386 -Ttext 0xc0010000 -e main \
+   -o "$BUILD/kernel.bin" \
+   "$BUILD/main.o" "$BUILD/print.o" "$BUILD/interrupt.o" "$BUILD/init.o" "$BUILD/timer.o" "$BUILD/kernel.o"
+
+echo "==> [--] Create system.map"
+nm "$BUILD/kernel.bin" | grep -v '\(compiled\)\|\(\.o$$\)\|\( [aU] \)\|\(\.\.ng$$\)\|\(LASH[RL]DI\)'| sort > $OSLAB_PATH/code/c00/build/system.map
+
+echo "==> [end] Writing image"
+write_sector "$BUILD/mbr.bin"      1   0
+write_sector "$BUILD/loader.bin"   4   2
+write_sector "$BUILD/kernel.bin" 200 9
+
+echo "==> Launching Bochs"
+cd "$OSLAB_PATH"
+bochs -f bochsrc.disk

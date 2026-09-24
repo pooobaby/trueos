@@ -80,9 +80,30 @@ c00/
 │   │   └── assert.c
 │   ├── stdio.c         # 用户态 printf
 │   └── string.c        # 字符串/内存操作
+├── tools/              # 开发辅助工具
+│   ├── run_loader      # 一键构建并启动 Bochs 的 Shell 脚本
+│   ├── compile_flags.txt # clangd / VSCode 用的编译参数提示
+│   └── bochsrc.disk    # Bochs 模拟器配置文件（含双硬盘）
 ├── build/              # 编译输出目录
-├── makefile            # 构建脚本
+├── makefile            # 完整构建脚本
 └── README.md
+
+### 项目根目录（/home/eric/trueos/）
+
+```
+trueos/
+├── code/c00/           # 本仓库（内核源码）
+├── bochs/              # Bochs 安装目录（含 bin/bochs 和 BIOS）
+├── hd60M.img           # 60MB 主硬盘镜像（ATA master）
+└── hd80M.img           # 80MB 从硬盘镜像（ATA slave，供文件系统实验用）
+```
+
+### 磁盘镜像
+
+| 文件 | 大小 | Bochs 角色 | 用途 |
+|------|------|------------|------|
+| `hd60M.img` | 60 MB | `ata0-master` | 存放 MBR、Loader、内核二进制 |
+| `hd80M.img` | 80 MB | `ata0-slave` | 从硬盘，供 IDE 驱动读写测试 |
 ```
 
 ---
@@ -97,11 +118,21 @@ c00/
 - **bochs** — x86 PC 模拟器（带调试器）
 - **dd** — 写磁盘镜像
 
-### 一键构建
+### 一键构建（makefile 完整版）
 
 ```bash
 cd /home/eric/trueos/code/c00
-make          # 编译 + 写磁盘镜像
+make          # 编译全部模块 + 写磁盘镜像
+```
+
+### 一键构建（run_loader 轻量版）
+
+项目还提供了一个简化版的构建脚本 `tools/run_loader`，适合早期调试（只编译 boot + kernel 核心模块）：
+
+```bash
+cd /home/eric/trueos
+./code/c00/tools/run_loader      # 构建并自动启动 Bochs
+./code/c00/tools/run_loader clean # 仅清理 build/ 下的 .o 和 .bin
 ```
 
 构建会依次完成：
@@ -114,7 +145,11 @@ make          # 编译 + 写磁盘镜像
 ### 运行
 
 ```bash
-bochs -f ~/trueos/bochsrc.disk
+# 方式一：用项目自带的 bochsrc.disk
+bochs -f /home/eric/trueos/code/c00/tools/bochsrc.disk
+
+# 方式二：用 run_loader 脚本（自动启动）
+/home/eric/trueos/code/c00/tools/run_loader
 ```
 
 Bochs 启动后会自动进入 TrueOS，在 shell 中键入 `help` 或 `ls /` 开始体验。
@@ -220,7 +255,7 @@ inode 使用 **12 直接块 + 1 一级间接块**，单文件最大约 70KB（14
 
 ```bash
 # Bochs 启动时自动进入调试器
-bochs -f ~/trueos/bochsrc.disk
+bochs -f /home/eric/trueos/code/c00/tools/bochsrc.disk
 ```
 
 常用 Bochs 调试命令：

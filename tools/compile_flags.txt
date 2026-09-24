@@ -1,0 +1,15 @@
+/home/eric/trueos/compile_flags.txt
+-m32
+-std=c99
+-nostdinc
+-ffreestanding
+-I/home/eric/trueos/code/c00/lib
+-I/home/eric/trueos/code/c00/lib/kernel
+-I/home/eric/trueos/code/c00/device
+-I/home/eric/trueos/code/c00/kernel
+-I/home/eric/trueos/code/c00/thread
+-I/home/eric/trueos/code/c00/userprog
+-I/home/eric/trueos/code/c00/lib/user
+-I/home/eric/trueos/code/c00/fs
+-I/home/eric/trueos/code/c00/shell
+
