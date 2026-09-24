@@ -1,0 +1,11 @@
+# Bochs 日志
+bochs.out
+
+# build/ 下的编译中间产物
+build/*.o
+build/*.d
+# 同时也忽略 build/ 下的二进制（可选，如果你想提交 kernel.bin 就删掉这行）
+# build/*.bin
+
+# 备份文件
+*.bak
